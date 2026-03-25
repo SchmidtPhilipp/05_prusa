@@ -3,6 +3,7 @@
 This repo contains a bash script that creates a **Debian LXC** on **Proxmox VE**, installs **PrusaLink** (venv + git installs), and configures **USB printer** pass-through (optional **webcam**). It matches the common “PrusaLink in LXC” workflow, with interactive USB discovery and safer serial handling than bind-mounting the wrong device major/minor.
 
 - Script: [`prusalink_proxmox_lxc_install.sh`](./prusalink_proxmox_lxc_install.sh)
+- This repository: [github.com/SchmidtPhilipp/05_prusa](https://github.com/SchmidtPhilipp/05_prusa)
 - Upstream project: [Prusa-Link](https://github.com/prusa3d/Prusa-Link)
 
 ## Prerequisites
@@ -14,12 +15,14 @@ This repo contains a bash script that creates a **Debian LXC** on **Proxmox VE**
 
 ## Run from a URL
 
-Replace `SCRIPT_URL` with the **raw** URL to the script (for example a GitHub **Raw** link).
+Raw install script (branch `main`):
+
+`https://raw.githubusercontent.com/SchmidtPhilipp/05_prusa/main/prusalink_proxmox_lxc_install.sh`
 
 On the **Proxmox host** as **root**:
 
 ```bash
-SCRIPT_URL='https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/prusalink_proxmox_lxc_install.sh'
+SCRIPT_URL='https://raw.githubusercontent.com/SchmidtPhilipp/05_prusa/main/prusalink_proxmox_lxc_install.sh'
 
 curl -fsSL "$SCRIPT_URL" -o /root/prusalink_proxmox_lxc_install.sh
 chmod +x /root/prusalink_proxmox_lxc_install.sh
@@ -29,7 +32,7 @@ chmod +x /root/prusalink_proxmox_lxc_install.sh
 Using `wget` instead of `curl`:
 
 ```bash
-SCRIPT_URL='https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/prusalink_proxmox_lxc_install.sh'
+SCRIPT_URL='https://raw.githubusercontent.com/SchmidtPhilipp/05_prusa/main/prusalink_proxmox_lxc_install.sh'
 
 wget -O /root/prusalink_proxmox_lxc_install.sh "$SCRIPT_URL"
 chmod +x /root/prusalink_proxmox_lxc_install.sh
@@ -39,10 +42,20 @@ chmod +x /root/prusalink_proxmox_lxc_install.sh
 **Pipe one-liner** (only use if you trust the URL and TLS endpoint):
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/prusalink_proxmox_lxc_install.sh' | bash
+curl -fsSL 'https://raw.githubusercontent.com/SchmidtPhilipp/05_prusa/main/prusalink_proxmox_lxc_install.sh' | bash
 ```
 
 Prefer saving to a file first so you can **edit variables** (CT ID, template, network) before executing.
+
+### Clone the repo instead
+
+```bash
+git clone https://github.com/SchmidtPhilipp/05_prusa.git
+cd 05_prusa
+chmod +x prusalink_proxmox_lxc_install.sh
+# edit variables, then (on the Proxmox host):
+sudo ./prusalink_proxmox_lxc_install.sh
+```
 
 ## Before you run
 
