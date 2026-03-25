@@ -76,8 +76,11 @@ set -euo pipefail
 CTID="${CTID:-}"
 HOSTNAME="prusalink"
 
-# Proxmox template (example from notes: Debian 12 standard 12.7-1)
-TEMPLATE="local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+# LXC template volid: storage:vztmpl/<file>. Must exist on host (`pveam list <storage>`).
+# If missing, the script lists templates interactively. Download: pveam update && pveam download ...
+TEMPLATE="${TEMPLATE:-local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst}"
+# Template storage id (usually "local" with dir-type content, not "local-lvm").
+VZTMPL_STORAGE="${VZTMPL_STORAGE:-local}"
 
 BRIDGE="vmbr0"
 
@@ -283,6 +286,71 @@ next_free_vmid() {
   echo "$id"
 }
 
+# List volids from pveam (column 1 after header).
+pveam_template_volids() {
+  local st="$1"
+  pveam list "$st" 2>/dev/null | awk 'NR > 1 && $1 != "" && $1 !~ /^-+$/ { print $1 }'
+}
+
+template_volid_on_storage() {
+  local st="$1" want="$2" v
+  while IFS= read -r v; do
+    [[ "$v" == "$want" ]] && return 0
+  done < <(pveam_template_volids "$st")
+  return 1
+}
+
+pick_lxc_template_interactive() {
+  local st="${1:-local}"
+  local -a rows
+  mapfile -t rows < <(pveam_template_volids "$st")
+  if [[ ${#rows[@]} -eq 0 ]]; then
+    echo "No LXC templates on storage \"${st}\"." >&2
+    echo "Run: pveam update && pveam available | grep -i debian" >&2
+    echo "Then: pveam download ${st} debian-12-standard_<version>_amd64.tar.zst" >&2
+    exit 1
+  fi
+  echo "" >&2
+  echo "Select LXC template (storage \"${st}\"):" >&2
+  local i
+  for i in "${!rows[@]}"; do
+    printf '  %2d) %s\n' "$((i + 1))" "${rows[$i]}" >&2
+  done
+  local sel
+  while true; do
+    read -r -p "Enter number (1-${#rows[@]}): " sel
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [[ "$sel" -ge 1 && "$sel" -le ${#rows[@]} ]]; then
+      echo "${rows[$((sel - 1))]}"
+      return 0
+    fi
+    echo "Invalid choice." >&2
+  done
+}
+
+# Sets TEMPLATE to a volid that exists on VZTMPL_STORAGE (or exits).
+resolve_lxc_template() {
+  local st="${VZTMPL_STORAGE:-local}"
+  if ! command -v pveam >/dev/null 2>&1; then
+    echo "pveam not found (expected on Proxmox VE)."
+    exit 1
+  fi
+  if template_volid_on_storage "$st" "$TEMPLATE"; then
+    echo "Using LXC template: ${TEMPLATE}"
+    return 0
+  fi
+  echo "Template not found on storage \"${st}\": ${TEMPLATE}"
+  echo "Listing what's installed on \"${st}\":"
+  pveam list "$st" 2>/dev/null || true
+  echo ""
+  echo "Download a Debian 12 standard image (adjust filename to pveam available):"
+  echo "  pveam update && pveam download ${st} debian-12-standard_12.7-1_amd64.tar.zst"
+  echo "Or set TEMPLATE and VZTMPL_STORAGE in this script / environment."
+  echo ""
+  echo "Pick an installed template:"
+  TEMPLATE="$(pick_lxc_template_interactive "$st")"
+  echo "Using LXC template: ${TEMPLATE}"
+}
+
 # -----------------------------------------------------------------------------
 # Host prerequisites
 # -----------------------------------------------------------------------------
@@ -309,6 +377,8 @@ if pct status "$CTID" >/dev/null 2>&1; then
   echo "CT $CTID already exists. Remove it or change CTID."
   exit 1
 fi
+
+resolve_lxc_template
 
 if [[ "$DISCOVER_USB_AT_RUNTIME" == "1" ]]; then
   discover_printer_interactive
