@@ -86,6 +86,7 @@ IP_MODE="static"
 IP_CIDR="192.168.1.50/24"
 GW="192.168.1.1"
 
+# Storage ID from `pvesm status` (e.g. local-lvm, local-zfs). Size = GiB, integer only (no "G" suffix).
 ROOTFS_STORAGE="local-lvm"
 ROOTFS_SIZE_GB="8"
 MEMORY_MB="1024" # notes used 512; 1G is safer with ffmpeg / extra services
@@ -365,7 +366,7 @@ pct create "$CTID" "$TEMPLATE" \
   --memory "$MEMORY_MB" \
   --cores "$CORES" \
   --swap "$SWAP_MB" \
-  --rootfs "${ROOTFS_STORAGE}:${ROOTFS_SIZE_GB}G" \
+  --rootfs "${ROOTFS_STORAGE}:${ROOTFS_SIZE_GB}" \
   --unprivileged "$UNPRIVILEGED" \
   --features nesting=1 \
   --onboot 1 \
