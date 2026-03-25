@@ -72,7 +72,8 @@ set -euo pipefail
 # User config (edit on the Proxmox host before running)
 # -----------------------------------------------------------------------------
 
-CTID="101"
+# VMID: unset, empty, or 0 = next free ID (≥100). Pin: CTID=101 or CTID=101 ./script.sh
+CTID="${CTID:-}"
 HOSTNAME="prusalink"
 
 # Proxmox template (example from notes: Debian 12 standard 12.7-1)
@@ -273,6 +274,15 @@ discover_webcam_interactive() {
   VIDEO_DEVS="${VIDEO_DEVS%% }"
 }
 
+# Proxmox uses one VMID space for VMs and LXCs; IDs <100 are reserved (pct.conf).
+next_free_vmid() {
+  local id="${1:-100}"
+  while [[ -e "/etc/pve/lxc/${id}.conf" ]] || [[ -e "/etc/pve/qemu-server/${id}.conf" ]]; do
+    id=$((id + 1))
+  done
+  echo "$id"
+}
+
 # -----------------------------------------------------------------------------
 # Host prerequisites
 # -----------------------------------------------------------------------------
@@ -284,6 +294,14 @@ fi
 
 if ! command -v pct >/dev/null 2>&1; then
   echo "pct not found. Run this on a Proxmox node."
+  exit 1
+fi
+
+if [[ -z "${CTID}" ]] || [[ "${CTID}" == "0" ]]; then
+  CTID="$(next_free_vmid 100)"
+  echo "Using next free VMID for this LXC: ${CTID}"
+elif ! [[ "${CTID}" =~ ^[0-9]+$ ]] || [[ "${CTID}" -lt 100 ]]; then
+  echo "CTID must be empty/0 (auto) or an integer >= 100 (got: ${CTID})"
   exit 1
 fi
 
