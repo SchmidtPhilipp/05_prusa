@@ -191,14 +191,14 @@ discover_printer_interactive() {
   ensure_lsusb
   local line bus_dec dev_dec tty
   line="$(pick_lsusb_entry "Select the USB device for your Prusa printer (composite listing is OK):")"
-  if [[ ! "$line" =~ Bus\ ([0-9]+)\ Device\ ([0-9]+): ]]; then
+  line="${line//$'\r'/}"
+  # Use 10# for decimal: stripping leading zeros with ##0* breaks / turns some values into 0.
+  if [[ ! "$line" =~ Bus[[:space:]]+([0-9]+)[[:space:]]+Device[[:space:]]+([0-9]+): ]]; then
     echo "Could not parse lsusb line: $line"
     exit 1
   fi
-  bus_dec="${BASH_REMATCH[1]##0*}"
-  bus_dec="${bus_dec:-0}"
-  dev_dec="${BASH_REMATCH[2]##0*}"
-  dev_dec="${dev_dec:-0}"
+  bus_dec=$((10#${BASH_REMATCH[1]}))
+  dev_dec=$((10#${BASH_REMATCH[2]}))
   PRINTER_USB_BUS="$(printf '%03d' "$bus_dec")"
   PRINTER_USB_DEV="$(printf '%03d' "$dev_dec")"
   echo ""
@@ -233,14 +233,13 @@ discover_webcam_interactive() {
   ensure_lsusb
   local line bus_dec dev_dec
   line="$(pick_lsusb_entry "Select the USB webcam (or its parent hub device if needed):")"
-  if [[ ! "$line" =~ Bus\ ([0-9]+)\ Device\ ([0-9]+): ]]; then
+  line="${line//$'\r'/}"
+  if [[ ! "$line" =~ Bus[[:space:]]+([0-9]+)[[:space:]]+Device[[:space:]]+([0-9]+): ]]; then
     echo "Could not parse lsusb line: $line"
     exit 1
   fi
-  bus_dec="${BASH_REMATCH[1]##0*}"
-  bus_dec="${bus_dec:-0}"
-  dev_dec="${BASH_REMATCH[2]##0*}"
-  dev_dec="${dev_dec:-0}"
+  bus_dec=$((10#${BASH_REMATCH[1]}))
+  dev_dec=$((10#${BASH_REMATCH[2]}))
   WEBCAM_USB_BUS="$(printf '%03d' "$bus_dec")"
   WEBCAM_USB_DEV="$(printf '%03d' "$dev_dec")"
   echo "Webcam USB bus ${WEBCAM_USB_BUS} device ${WEBCAM_USB_DEV}"
