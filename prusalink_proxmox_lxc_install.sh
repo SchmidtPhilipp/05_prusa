@@ -27,10 +27,9 @@ set -euo pipefail
 #    Optional: ffmpeg (webcam / probing); extra libs often required by PrusaLink
 #    wheels from git: libmagic1, build deps — this script installs those too.
 #
-# 5) User "pi": groups adm,sudo,tty,dialout,video (dialout = serial; video =
-#    V4L when you pass /dev/video*).
+# 5) Install and run as root (no extra user required).
 #
-# 6) As pi: python3 -m venv ~/venv-prusalink && pip install (no cache):
+# 6) Create a dedicated venv under /opt/prusalink/venv and pip install (no cache):
 #      git+https://github.com/prusa3d/gcode-metadata.git
 #      git+https://github.com/prusa3d/Prusa-Connect-SDK-Printer.git
 #      git+https://github.com/prusa3d/Prusa-Link.git
@@ -568,37 +567,30 @@ if [[ '${INSTALL_FFMPEG}' == '1' ]]; then PKGS+=(ffmpeg); fi
 apt-get install -y \"\${PKGS[@]}\"
 "
 
-echo "Create user pi and /etc/prusalink..."
+echo "Create /etc/prusalink and /opt/prusalink..."
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
-if ! id pi >/dev/null 2>&1; then
-  adduser --disabled-password --gecos \"\" pi
-  echo 'pi ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pi
-  chmod 440 /etc/sudoers.d/pi
-fi
-usermod -a -G adm,sudo,tty,dialout,video pi || true
-install -d -m 0755 -o pi -g pi /etc/prusalink
+install -d -m 0755 -o root -g root /etc/prusalink
+install -d -m 0755 -o root -g root /opt/prusalink
 "
 
 echo "Install upstream prusalink.ini..."
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
 curl -fsSL -o /tmp/prusalink.ini '${PRUSALINK_INI_URL}'
-install -m 0644 -o pi -g pi /tmp/prusalink.ini /etc/prusalink/prusalink.ini
+install -m 0644 -o root -g root /tmp/prusalink.ini /etc/prusalink/prusalink.ini
 "
 
-echo "venv + pip install Prusa-Link stack (from git, as pi)..."
+echo "venv + pip install Prusa-Link stack (from git, as root)..."
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
-su - pi -c 'python3 -m venv /home/pi/venv-prusalink'
-su - pi -c \"
-  source /home/pi/venv-prusalink/bin/activate
-  pip install --no-cache-dir -U pip setuptools wheel
-  pip install --no-cache-dir \\
-    git+https://github.com/prusa3d/gcode-metadata.git \\
-    git+https://github.com/prusa3d/Prusa-Connect-SDK-Printer.git \\
-    git+https://github.com/prusa3d/Prusa-Link.git
-\"
+python3 -m venv /opt/prusalink/venv
+source /opt/prusalink/venv/bin/activate
+pip install --no-cache-dir -U pip setuptools wheel
+pip install --no-cache-dir \
+  git+https://github.com/prusa3d/gcode-metadata.git \
+  git+https://github.com/prusa3d/Prusa-Connect-SDK-Printer.git \
+  git+https://github.com/prusa3d/Prusa-Link.git
 "
 
 echo "Set [printer] port in /etc/prusalink/prusalink.ini..."
@@ -610,7 +602,7 @@ sed -i \\
   -e '/^[[:space:]]*;[[:space:]]*port[[:space:]]*=/s|.*|port = ${PRINTER_TTY_IN_CT}|' \\
   -e '/^[[:space:]]*port[[:space:]]*=/s|^[[:space:]]*port[[:space:]]*=.*|port = ${PRINTER_TTY_IN_CT}|' \\
   \"\$INI\"
-chown pi:pi \"\$INI\"
+chown root:root \"\$INI\"
 "
 
 echo "Install systemd unit (prusalink -f + Type=simple)..."
@@ -625,12 +617,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi
+User=root
+Group=root
+WorkingDirectory=/opt/prusalink
 Environment=LC_ALL=C.UTF-8
 Environment=LANG=C.UTF-8
-ExecStart=/home/pi/venv-prusalink/bin/prusalink -f
+ExecStart=/opt/prusalink/venv/bin/prusalink -f
 Restart=on-failure
 
 [Install]
@@ -640,7 +632,7 @@ UNIT
   systemctl enable prusalink.service
   systemctl restart prusalink.service || systemctl start prusalink.service
 else
-  echo 'No systemd in CT; run as pi: source ~/venv-prusalink/bin/activate && prusalink -f'
+  echo 'No systemd in CT; run: source /opt/prusalink/venv/bin/activate && prusalink -f'
 fi
 "
 
@@ -663,5 +655,5 @@ fi
 echo ""
 echo "=== Done ==="
 echo "Open: http://<container-ip>:8080"
-echo "Debug: pct exec ${CTID} -- su - pi -c 'source ~/venv-prusalink/bin/activate && prusalink -f'"
+echo "Debug: pct exec ${CTID} -- bash -lc 'source /opt/prusalink/venv/bin/activate && prusalink -f -i'"
 echo "Logs:  pct exec ${CTID} -- journalctl -u prusalink.service -e --no-pager"
