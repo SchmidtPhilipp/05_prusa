@@ -519,12 +519,13 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get -y upgrade
 PKGS=(
-  git libcap-dev libturbojpeg0 libatlas-base-dev libffi-dev
+  git libcap-dev libturbojpeg0 libffi-dev
   gcc sudo curl
   python3-dev python3-full python3-pip python3-numpy
-  libmagic1 libopenblas0 iptables
+  libmagic1 libopenblas0 libopenblas-dev iptables
   build-essential cmake
 )
+# libatlas-base-dev was dropped after Debian bookworm; OpenBLAS replaces it for numpy/PrusaLink.
 if [[ '${INSTALL_FFMPEG}' == '1' ]]; then PKGS+=(ffmpeg); fi
 apt-get install -y \"\${PKGS[@]}\"
 "
