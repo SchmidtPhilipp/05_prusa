@@ -300,6 +300,25 @@ template_volid_on_storage() {
   return 1
 }
 
+template_filename_from_volid() {
+  # volid examples:
+  #   local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+  # -> debian-12-standard_12.7-1_amd64.tar.zst
+  local volid="$1"
+  local file="${volid#*:vztmpl/}"
+  echo "$file"
+}
+
+latest_debian12_template_filename() {
+  # Pick the newest debian-12-standard_..._amd64.tar.zst from pveam available.
+  # sort -V handles Debian template versions reasonably well.
+  pveam available 2>/dev/null \
+    | awk '{print $2}' \
+    | grep -E '^debian-12-standard_.*_amd64\.tar\.zst$' \
+    | sort -V \
+    | tail -n 1
+}
+
 pick_lxc_template_interactive() {
   local st="${1:-local}"
   local -a rows
@@ -338,13 +357,32 @@ resolve_lxc_template() {
     echo "Using LXC template: ${TEMPLATE}"
     return 0
   fi
+
+  # Automatic download path (preferred): Debian 12 template to avoid Python 3.13 issues.
+  if [[ "$TEMPLATE" == *":vztmpl/debian-12-standard_"*"_amd64.tar.zst" ]]; then
+    local want_file latest
+    want_file="$(template_filename_from_volid "$TEMPLATE")"
+    echo "Template not found on storage \"${st}\": ${TEMPLATE}"
+    echo "Trying automatic download to \"${st}\": ${want_file}"
+    pveam update || true
+    if pveam download "$st" "$want_file"; then
+      echo "Using LXC template: ${TEMPLATE}"
+      return 0
+    fi
+
+    latest="$(latest_debian12_template_filename || true)"
+    if [[ -n "$latest" ]]; then
+      echo "Auto-download failed for ${want_file}. Trying latest Debian 12 template: ${latest}"
+      pveam download "$st" "$latest"
+      TEMPLATE="${st}:vztmpl/${latest}"
+      echo "Using LXC template: ${TEMPLATE}"
+      return 0
+    fi
+  fi
+
   echo "Template not found on storage \"${st}\": ${TEMPLATE}"
   echo "Listing what's installed on \"${st}\":"
   pveam list "$st" 2>/dev/null || true
-  echo ""
-  echo "Download a Debian 12 standard image (adjust filename to pveam available):"
-  echo "  pveam update && pveam download ${st} debian-12-standard_12.7-1_amd64.tar.zst"
-  echo "Or set TEMPLATE and VZTMPL_STORAGE in this script / environment."
   echo ""
   echo "Pick an installed template:"
   TEMPLATE="$(pick_lxc_template_interactive "$st")"
