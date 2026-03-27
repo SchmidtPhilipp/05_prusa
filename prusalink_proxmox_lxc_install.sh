@@ -29,13 +29,12 @@ set -euo pipefail
 #
 # 5) Install and run as root (no extra user required).
 #
-# 6) Create a dedicated venv under /opt/prusalink/venv and pip install (no cache):
-#      git+https://github.com/prusa3d/gcode-metadata.git
-#      git+https://github.com/prusa3d/Prusa-Connect-SDK-Printer.git
-#      git+https://github.com/prusa3d/Prusa-Link.git
+# 6) venv under /opt/prusalink/venv; pip pins + git tags (defaults: gcode-metadata 0.2.0,
+#    SDK 0.8.1, Prusa-Link 0.8.1 — see variables PRUSALINK_GIT_REF / PRUSA_SDK_GIT_REF /
+#    GCODE_METADATA_GIT_REF).
 #
-# 7) mkdir /etc/prusalink && chown pi:pi; install default config from upstream:
-#      prusa/link/data/prusalink.ini
+# 7) mkdir /etc/prusalink; install default config from the same PrusaLink tag as the
+#    pip install (see pinned versions below).
 #
 # 8) USB pass-through on Proxmox host (unprivileged CT):
 #    - USB device nodes use major 189 on many kernels → allow c 189:* rwm
@@ -64,6 +63,19 @@ set -euo pipefail
 #   TTY via sysfs when possible.
 #   DISCOVER_USB_AT_RUNTIME=0 — use the PRINTER_USB_* / PRINTER_TTY_* /
 #   WEBCAM_* / VIDEO_DEVS values you set above (non-interactive).
+#
+# =============================================================================
+#
+# --- Pinned stack (matches typical “guide” era: PrusaLink 0.8.1, Jul 2024) -----
+#
+#   OS template:   Debian 12 (bookworm) LXC only — provides Python 3.11.x
+#   PrusaLink:     git tag 0.8.1  → https://github.com/prusa3d/Prusa-Link/releases/tag/0.8.1
+#   SDK:           git tag 0.8.1  → Prusa-Connect-SDK-Printer
+#   gcode-metadata: git tag 0.2.0 (used as py-gcode-metadata upstream for that line)
+#   pip tooling:   pip 24.0, setuptools 69.5.1, wheel 0.43.0 (bookworm-era pins)
+#
+# Debian 13 / Python 3.13 is rejected: stdlib `cgi` was removed; PoorWSGI used by
+# PrusaLink 0.8.x still imports it → install fails on trixie unless upstream fixes.
 #
 # =============================================================================
 
@@ -122,8 +134,24 @@ VIDEO_DEVS="" # e.g. "0 1" — set when ENABLE_WEBCAM=1
 
 INSTALL_FFMPEG="0" # set 1 if you use cameras / format probing inside CT
 
-# Official default config from Prusa-Link tree
-PRUSALINK_INI_URL="https://raw.githubusercontent.com/prusa3d/Prusa-Link/master/prusa/link/data/prusalink.ini"
+# Reject non-bookworm templates (e.g. debian-13-standard → Python 3.13).
+REQUIRE_DEBIAN12_TEMPLATE="${REQUIRE_DEBIAN12_TEMPLATE:-1}"
+# Inside the CT, require Python 3.11 (from bookworm).
+REQUIRE_PYTHON_311="${REQUIRE_PYTHON_311:-1}"
+
+# Git refs for the three-repo install (same order as common guides).
+PRUSALINK_GIT_REF="${PRUSALINK_GIT_REF:-0.8.1}"
+PRUSA_SDK_GIT_REF="${PRUSA_SDK_GIT_REF:-0.8.1}"
+GCODE_METADATA_GIT_REF="${GCODE_METADATA_GIT_REF:-0.2.0}"
+
+# Pip / setuptools / wheel pins (Jul 2024–era; override only if you know why).
+PIP_PIN="${PIP_PIN:-24.0}"
+SETUPTOOLS_PIN="${SETUPTOOLS_PIN:-69.5.1}"
+WHEEL_PIN="${WHEEL_PIN:-0.43.0}"
+
+# Default prusalink.ini from the same PrusaLink tag as PRUSALINK_GIT_REF (override with env if needed).
+_DEFAULT_PRUSALINK_INI="https://raw.githubusercontent.com/prusa3d/Prusa-Link/${PRUSALINK_GIT_REF}/prusa/link/data/prusalink.ini"
+PRUSALINK_INI_URL="${PRUSALINK_INI_URL:-$_DEFAULT_PRUSALINK_INI}"
 
 # -----------------------------------------------------------------------------
 # USB discovery helpers (Proxmox host)
@@ -388,6 +416,19 @@ resolve_lxc_template() {
   echo "Using LXC template: ${TEMPLATE}"
 }
 
+enforce_debian12_template() {
+  [[ "${REQUIRE_DEBIAN12_TEMPLATE:-1}" == "1" ]] || return 0
+  case "$TEMPLATE" in
+  *debian-12-standard_*_amd64.tar.zst) return 0 ;;
+  *)
+    echo "ERROR: Pinned stack needs Debian 12 (bookworm) LXC: *debian-12-standard_*_amd64.tar.zst"
+    echo "Current TEMPLATE=${TEMPLATE}"
+    echo "Reason: Python 3.11 + PrusaLink ${PRUSALINK_GIT_REF} (PoorWSGI/cgi); Debian 13/Python 3.13 breaks."
+    exit 1
+    ;;
+  esac
+}
+
 # -----------------------------------------------------------------------------
 # Host prerequisites
 # -----------------------------------------------------------------------------
@@ -416,6 +457,7 @@ if pct status "$CTID" >/dev/null 2>&1; then
 fi
 
 resolve_lxc_template
+enforce_debian12_template
 
 if [[ "$DISCOVER_USB_AT_RUNTIME" == "1" ]]; then
   discover_printer_interactive
@@ -567,6 +609,19 @@ if [[ '${INSTALL_FFMPEG}' == '1' ]]; then PKGS+=(ffmpeg); fi
 apt-get install -y \"\${PKGS[@]}\"
 "
 
+echo "Verify Python 3.11 (bookworm) inside CT..."
+pct exec "$CTID" -- bash -lc "
+set -euo pipefail
+if [[ '${REQUIRE_PYTHON_311}' == '1' ]]; then
+  ver=\$(python3 -c 'import sys; print(\"%d.%d\" % (sys.version_info.major, sys.version_info.minor))')
+  if [[ \"\$ver\" != '3.11' ]]; then
+    echo \"ERROR: Expected Python 3.11 (Debian 12 bookworm). Got Python \$ver from \$(python3 -V)\"
+    exit 1
+  fi
+  echo \"OK: \$(python3 -V)\"
+fi
+"
+
 echo "Create /etc/prusalink and /opt/prusalink..."
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
@@ -581,16 +636,17 @@ curl -fsSL -o /tmp/prusalink.ini '${PRUSALINK_INI_URL}'
 install -m 0644 -o root -g root /tmp/prusalink.ini /etc/prusalink/prusalink.ini
 "
 
-echo "venv + pip install Prusa-Link stack (from git, as root)..."
+echo "venv + pip install Prusa-Link stack (pinned git refs, as root)..."
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
 python3 -m venv /opt/prusalink/venv
 source /opt/prusalink/venv/bin/activate
-pip install --no-cache-dir -U pip setuptools wheel
-pip install --no-cache-dir \
-  git+https://github.com/prusa3d/gcode-metadata.git \
-  git+https://github.com/prusa3d/Prusa-Connect-SDK-Printer.git \
-  git+https://github.com/prusa3d/Prusa-Link.git
+pip install --no-cache-dir pip==${PIP_PIN} setuptools==${SETUPTOOLS_PIN} wheel==${WHEEL_PIN}
+pip install --no-cache-dir \\
+  git+https://github.com/prusa3d/gcode-metadata.git@${GCODE_METADATA_GIT_REF} \\
+  git+https://github.com/prusa3d/Prusa-Connect-SDK-Printer.git@${PRUSA_SDK_GIT_REF} \\
+  git+https://github.com/prusa3d/Prusa-Link.git@${PRUSALINK_GIT_REF}
+/opt/prusalink/venv/bin/prusalink --version
 "
 
 echo "Set [printer] port in /etc/prusalink/prusalink.ini..."
@@ -654,6 +710,7 @@ fi
 
 echo ""
 echo "=== Done ==="
+echo "Pinned: Debian 12 LXC, Python 3.11, Prusa-Link git ${PRUSALINK_GIT_REF}, SDK ${PRUSA_SDK_GIT_REF}, gcode-metadata ${GCODE_METADATA_GIT_REF}"
 echo "Open: http://<container-ip>:8080"
 echo "Debug: pct exec ${CTID} -- bash -lc 'source /opt/prusalink/venv/bin/activate && prusalink -f -i'"
 echo "Logs:  pct exec ${CTID} -- journalctl -u prusalink.service -e --no-pager"
