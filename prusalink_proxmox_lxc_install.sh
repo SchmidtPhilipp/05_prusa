@@ -114,6 +114,15 @@ UNPRIVILEGED="1"
 # 1 = show menus during this script (see header). 0 = use variables only.
 DISCOVER_USB_AT_RUNTIME="${DISCOVER_USB_AT_RUNTIME:-1}"
 
+# 1 = suppress noisy apt/pip/pveam/pct output; still print WARNING/ERROR and failures.
+# 0 = full installer logs (apt progress, pip download lines, etc.).
+QUIET_INSTALL="${QUIET_INSTALL:-1}"
+
+# 1 = after install (or on failure) print a "debug bundle" you can copy-paste for support.
+# Optional: INSTALL_DEBUG_LOG=/root/prusalink-install-debug.txt to also save that output to a file.
+INSTALL_DEBUG="${INSTALL_DEBUG:-0}"
+INSTALL_DEBUG_LOG="${INSTALL_DEBUG_LOG:-}"
+
 # Printer: character device on Proxmox host (filled by discovery or set by hand)
 PRINTER_TTY_HOST="${PRINTER_TTY_HOST:-/dev/ttyACM0}"
 # Same path inside CT after bind-mount (usually keep name identical)
@@ -163,8 +172,13 @@ ensure_lsusb() {
   fi
   echo "Installing usbutils (provides lsusb)..."
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y usbutils
+  if [[ "${QUIET_INSTALL:-1}" == "1" ]]; then
+    apt-get update -qq
+    apt-get install -y -qq usbutils
+  else
+    apt-get update -qq
+    apt-get install -y usbutils
+  fi
 }
 
 # Args: decimal bus, decimal dev (no leading zeros)
@@ -387,23 +401,50 @@ resolve_lxc_template() {
 
   # Automatic download path (preferred): Debian 12 template to avoid Python 3.13 issues.
   if [[ "$TEMPLATE" == *":vztmpl/debian-12-standard_"*"_amd64.tar.zst" ]]; then
-    local want_file latest
+    local want_file latest out
     want_file="$(template_filename_from_volid "$TEMPLATE")"
     echo "Template not found on storage \"${st}\": ${TEMPLATE}"
     echo "Trying automatic download to \"${st}\": ${want_file}"
-    pveam update || true
-    if pveam download "$st" "$want_file"; then
-      echo "Using LXC template: ${TEMPLATE}"
-      return 0
+    if [[ "${QUIET_INSTALL:-1}" == "1" ]]; then
+      pveam update >/dev/null 2>&1 || true
+    else
+      pveam update || true
+    fi
+
+    if [[ "${QUIET_INSTALL:-1}" == "1" ]]; then
+      if out="$(pveam download "$st" "$want_file" 2>&1)"; then
+        echo "Using LXC template: ${TEMPLATE}"
+        return 0
+      else
+        echo "WARNING: pveam download failed for ${want_file}:"
+        printf '%s\n' "$out"
+      fi
+    else
+      if pveam download "$st" "$want_file"; then
+        echo "Using LXC template: ${TEMPLATE}"
+        return 0
+      fi
     fi
 
     latest="$(latest_debian12_template_filename || true)"
     if [[ -n "$latest" ]]; then
-      echo "Auto-download failed for ${want_file}. Trying latest Debian 12 template: ${latest}"
-      pveam download "$st" "$latest"
-      TEMPLATE="${st}:vztmpl/${latest}"
-      echo "Using LXC template: ${TEMPLATE}"
-      return 0
+      echo "Trying latest Debian 12 template: ${latest}"
+      if [[ "${QUIET_INSTALL:-1}" == "1" ]]; then
+        if out="$(pveam download "$st" "$latest" 2>&1)"; then
+          TEMPLATE="${st}:vztmpl/${latest}"
+          echo "Using LXC template: ${TEMPLATE}"
+          return 0
+        else
+          echo "ERROR: pveam download failed for ${latest}"
+          printf '%s\n' "$out"
+        fi
+      else
+        if pveam download "$st" "$latest"; then
+          TEMPLATE="${st}:vztmpl/${latest}"
+          echo "Using LXC template: ${TEMPLATE}"
+          return 0
+        fi
+      fi
     fi
   fi
 
@@ -427,6 +468,111 @@ enforce_debian12_template() {
     exit 1
     ;;
   esac
+}
+
+# Copy-paste friendly diagnostics when INSTALL_DEBUG=1 (end of run or ERR trap).
+emit_install_debug_bundle() {
+  [[ "${INSTALL_DEBUG:-0}" == "1" ]] || return 0
+  set +e
+  local divider="========== PRUSALINK INSTALL DEBUG BUNDLE (copy from next line down) =========="
+
+  __emit_install_debug_bundle_print() {
+    echo ""
+    echo "$divider"
+    echo "# UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)  host: $(hostname -f 2>/dev/null || hostname)"
+    echo "# INSTALL_DEBUG=1 — redact passwords/tokens before sharing."
+    echo ""
+    echo "--- installer env (no secrets expected) ---"
+    echo "CTID=${CTID:-}  TEMPLATE=${TEMPLATE:-}"
+    echo "PRUSALINK_GIT_REF=${PRUSALINK_GIT_REF:-} PRUSA_SDK_GIT_REF=${PRUSA_SDK_GIT_REF:-} GCODE_METADATA_GIT_REF=${GCODE_METADATA_GIT_REF:-}"
+    echo "PRINTER_TTY_HOST=${PRINTER_TTY_HOST:-} PRINTER_TTY_IN_CT=${PRINTER_TTY_IN_CT:-}"
+    echo "PRINTER_USB_BUS=${PRINTER_USB_BUS:-} PRINTER_USB_DEV=${PRINTER_USB_DEV:-}"
+    echo "IP_MODE=${IP_MODE:-} IP_CIDR=${IP_CIDR:-} GW=${GW:-} BRIDGE=${BRIDGE:-}"
+    echo "UNPRIVILEGED=${UNPRIVILEGED:-} QUIET_INSTALL=${QUIET_INSTALL:-} ENABLE_WEBCAM=${ENABLE_WEBCAM:-}"
+    echo ""
+    echo "--- host: Proxmox / kernel ---"
+    command -v pveversion >/dev/null 2>&1 && pveversion
+    uname -a 2>/dev/null
+    echo ""
+    if [[ -n "${CTID:-}" && -f "/etc/pve/lxc/${CTID}.conf" ]]; then
+      echo "--- host: /etc/pve/lxc/${CTID}.conf (filtered) ---"
+      grep -E '^(hostname|net0|rootfs|unprivileged|features|lxc\.cgroup2|lxc\.mount\.entry)' "/etc/pve/lxc/${CTID}.conf" 2>/dev/null || true
+      echo ""
+    fi
+    if [[ -n "${PRINTER_TTY_HOST:-}" ]]; then
+      echo "--- host: printer serial node ---"
+      ls -l "$PRINTER_TTY_HOST" 2>&1
+      echo ""
+    fi
+    if [[ -n "${PRINTER_USB_BUS:-}" && -n "${PRINTER_USB_DEV:-}" ]]; then
+      echo "--- host: USB passthrough node ---"
+      ls -l "/dev/bus/usb/${PRINTER_USB_BUS}/${PRINTER_USB_DEV}" 2>&1
+      echo ""
+    fi
+    echo "--- container: status ---"
+    if [[ -z "${CTID:-}" ]]; then
+      echo "(CTID not set yet)"
+    elif pct status "$CTID" &>/dev/null; then
+      pct status "$CTID"
+      echo ""
+      echo "--- container: diagnostics (pct exec) ---"
+      pct exec "$CTID" -- bash -s <<CTDBG
+set +e
+echo "### ip -br a ###"
+ip -br a 2>&1
+echo ""
+echo "### python3 ###"
+python3 -V 2>&1
+echo ""
+echo "### prusalink --version ###"
+/opt/prusalink/venv/bin/prusalink --version 2>&1
+echo ""
+echo "### prusalink.ini excerpts ([http] / [printer]) ###"
+grep -A15 '^\[http\]' /etc/prusalink/prusalink.ini 2>/dev/null | head -n 16
+grep -A25 '^\[printer\]' /etc/prusalink/prusalink.ini 2>/dev/null | head -n 26
+echo ""
+echo "### serial device in CT (${PRINTER_TTY_IN_CT}) ###"
+ls -l "${PRINTER_TTY_IN_CT}" 2>&1
+echo ""
+echo "### systemctl status prusalink.service ###"
+systemctl status prusalink.service --no-pager -l 2>&1 | head -n 45
+echo ""
+echo "### journalctl -u prusalink.service (last 60 lines) ###"
+journalctl -u prusalink.service -n 60 --no-pager 2>&1
+echo ""
+echo "### listeners (8080) ###"
+if command -v ss >/dev/null 2>&1; then
+  ss -lntp 2>/dev/null | grep -E ':8080|State' || ss -lntp 2>/dev/null | head -n 25
+else
+  netstat -lntp 2>/dev/null | head -n 25 || true
+fi
+CTDBG
+    else
+      echo "(CT ${CTID} not running or missing — skipping pct exec)"
+    fi
+    echo ""
+    echo "$divider"
+    echo ""
+  }
+
+  if [[ -n "${INSTALL_DEBUG_LOG}" ]]; then
+    __emit_install_debug_bundle_print | tee "${INSTALL_DEBUG_LOG}"
+    echo "Debug bundle saved: ${INSTALL_DEBUG_LOG}"
+  else
+    __emit_install_debug_bundle_print
+  fi
+  set -e
+}
+
+install_debug_err_trap() {
+  local ec=$?
+  trap - ERR
+  if [[ "${INSTALL_DEBUG:-0}" == "1" ]]; then
+    echo "" >&2
+    echo "=== Installer failed (exit ${ec}); debug bundle below ===" >&2
+    emit_install_debug_bundle || true
+  fi
+  exit "$ec"
 }
 
 # -----------------------------------------------------------------------------
@@ -454,6 +600,10 @@ fi
 if pct status "$CTID" >/dev/null 2>&1; then
   echo "CT $CTID already exists. Remove it or change CTID."
   exit 1
+fi
+
+if [[ "${INSTALL_DEBUG:-0}" == "1" ]]; then
+  trap 'install_debug_err_trap' ERR
 fi
 
 resolve_lxc_template
@@ -506,20 +656,38 @@ fi
 # Create CT
 # -----------------------------------------------------------------------------
 
-echo "Creating CT ${CTID} (${HOSTNAME})..."
-
-pct create "$CTID" "$TEMPLATE" \
-  --hostname "$HOSTNAME" \
-  --ostype debian \
-  --net0 "$NET0" \
-  --memory "$MEMORY_MB" \
-  --cores "$CORES" \
-  --swap "$SWAP_MB" \
-  --rootfs "${ROOTFS_STORAGE}:${ROOTFS_SIZE_GB}" \
-  --unprivileged "$UNPRIVILEGED" \
-  --features nesting=1 \
-  --onboot 1 \
-  --startup "order=${STARTUP_ORDER}"
+if [[ "${QUIET_INSTALL:-1}" == "1" ]]; then
+  if ! pct_create_out="$(pct create "$CTID" "$TEMPLATE" \
+    --hostname "$HOSTNAME" \
+    --ostype debian \
+    --net0 "$NET0" \
+    --memory "$MEMORY_MB" \
+    --cores "$CORES" \
+    --swap "$SWAP_MB" \
+    --rootfs "${ROOTFS_STORAGE}:${ROOTFS_SIZE_GB}" \
+    --unprivileged "$UNPRIVILEGED" \
+    --features nesting=1 \
+    --onboot 1 \
+    --startup "order=${STARTUP_ORDER}" 2>&1)"; then
+    echo "ERROR: pct create failed:"
+    printf '%s\n' "$pct_create_out"
+    exit 1
+  fi
+else
+  echo "Creating CT ${CTID} (${HOSTNAME})..."
+  pct create "$CTID" "$TEMPLATE" \
+    --hostname "$HOSTNAME" \
+    --ostype debian \
+    --net0 "$NET0" \
+    --memory "$MEMORY_MB" \
+    --cores "$CORES" \
+    --swap "$SWAP_MB" \
+    --rootfs "${ROOTFS_STORAGE}:${ROOTFS_SIZE_GB}" \
+    --unprivileged "$UNPRIVILEGED" \
+    --features nesting=1 \
+    --onboot 1 \
+    --startup "order=${STARTUP_ORDER}"
+fi
 
 # -----------------------------------------------------------------------------
 # Append LXC device / mount config (guide pattern, tty major corrected)
@@ -585,18 +753,32 @@ fi
 # Start CT and provision Debian + PrusaLink (guide steps 3–7, 10)
 # -----------------------------------------------------------------------------
 
-echo "Starting CT ${CTID}..."
-pct start "$CTID"
-
-echo "Waiting for boot..."
+if [[ "${QUIET_INSTALL:-1}" == "1" ]]; then
+  if ! pct_start_out="$(pct start "$CTID" 2>&1)"; then
+    echo "ERROR: pct start failed:"
+    printf '%s\n' "$pct_start_out"
+    exit 1
+  fi
+else
+  echo "Starting CT ${CTID}..."
+  pct start "$CTID"
+  echo "Waiting for boot..."
+fi
 sleep 12
 
-echo "apt update/upgrade and install packages..."
+if [[ "${QUIET_INSTALL:-1}" != "1" ]]; then
+  echo "apt update/upgrade and install packages..."
+fi
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get -y upgrade
+if [[ '${QUIET_INSTALL}' == '1' ]]; then
+  apt-get update -qq
+  apt-get -y -qq upgrade
+else
+  apt-get update
+  apt-get -y upgrade
+fi
 PKGS=(
   git libcap-dev libturbojpeg0 libffi-dev
   gcc sudo curl
@@ -606,10 +788,16 @@ PKGS=(
 )
 # libatlas-base-dev was dropped after Debian bookworm; OpenBLAS replaces it for numpy/PrusaLink.
 if [[ '${INSTALL_FFMPEG}' == '1' ]]; then PKGS+=(ffmpeg); fi
-apt-get install -y \"\${PKGS[@]}\"
+if [[ '${QUIET_INSTALL}' == '1' ]]; then
+  apt-get install -y -qq \"\${PKGS[@]}\"
+else
+  apt-get install -y \"\${PKGS[@]}\"
+fi
 "
 
-echo "Verify Python 3.11 (bookworm) inside CT..."
+if [[ "${QUIET_INSTALL:-1}" != "1" ]]; then
+  echo "Verify Python 3.11 (bookworm) inside CT..."
+fi
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
 if [[ '${REQUIRE_PYTHON_311}' == '1' ]]; then
@@ -618,38 +806,57 @@ if [[ '${REQUIRE_PYTHON_311}' == '1' ]]; then
     echo \"ERROR: Expected Python 3.11 (Debian 12 bookworm). Got Python \$ver from \$(python3 -V)\"
     exit 1
   fi
-  echo \"OK: \$(python3 -V)\"
+  if [[ '${QUIET_INSTALL}' != '1' ]]; then
+    echo \"OK: \$(python3 -V)\"
+  fi
 fi
 "
 
-echo "Create /etc/prusalink and /opt/prusalink..."
+if [[ "${QUIET_INSTALL:-1}" != "1" ]]; then
+  echo "Create /etc/prusalink and /opt/prusalink..."
+fi
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
 install -d -m 0755 -o root -g root /etc/prusalink
 install -d -m 0755 -o root -g root /opt/prusalink
 "
 
-echo "Install upstream prusalink.ini..."
+if [[ "${QUIET_INSTALL:-1}" != "1" ]]; then
+  echo "Install upstream prusalink.ini..."
+fi
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
 curl -fsSL -o /tmp/prusalink.ini '${PRUSALINK_INI_URL}'
 install -m 0644 -o root -g root /tmp/prusalink.ini /etc/prusalink/prusalink.ini
 "
 
-echo "venv + pip install Prusa-Link stack (pinned git refs, as root)..."
+if [[ "${QUIET_INSTALL:-1}" != "1" ]]; then
+  echo "venv + pip install Prusa-Link stack (pinned git refs, as root)..."
+fi
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
 python3 -m venv /opt/prusalink/venv
 source /opt/prusalink/venv/bin/activate
-pip install --no-cache-dir pip==${PIP_PIN} setuptools==${SETUPTOOLS_PIN} wheel==${WHEEL_PIN}
-pip install --no-cache-dir \\
-  git+https://github.com/prusa3d/gcode-metadata.git@${GCODE_METADATA_GIT_REF} \\
-  git+https://github.com/prusa3d/Prusa-Connect-SDK-Printer.git@${PRUSA_SDK_GIT_REF} \\
-  git+https://github.com/prusa3d/Prusa-Link.git@${PRUSALINK_GIT_REF}
-/opt/prusalink/venv/bin/prusalink --version
+if [[ '${QUIET_INSTALL}' == '1' ]]; then
+  pip install -q --no-cache-dir pip==${PIP_PIN} setuptools==${SETUPTOOLS_PIN} wheel==${WHEEL_PIN}
+  pip install -q --no-cache-dir \\
+    git+https://github.com/prusa3d/gcode-metadata.git@${GCODE_METADATA_GIT_REF} \\
+    git+https://github.com/prusa3d/Prusa-Connect-SDK-Printer.git@${PRUSA_SDK_GIT_REF} \\
+    git+https://github.com/prusa3d/Prusa-Link.git@${PRUSALINK_GIT_REF}
+  /opt/prusalink/venv/bin/prusalink --version >/dev/null
+else
+  pip install --no-cache-dir pip==${PIP_PIN} setuptools==${SETUPTOOLS_PIN} wheel==${WHEEL_PIN}
+  pip install --no-cache-dir \\
+    git+https://github.com/prusa3d/gcode-metadata.git@${GCODE_METADATA_GIT_REF} \\
+    git+https://github.com/prusa3d/Prusa-Connect-SDK-Printer.git@${PRUSA_SDK_GIT_REF} \\
+    git+https://github.com/prusa3d/Prusa-Link.git@${PRUSALINK_GIT_REF}
+  /opt/prusalink/venv/bin/prusalink --version
+fi
 "
 
-echo "Set [printer] port in /etc/prusalink/prusalink.ini..."
+if [[ "${QUIET_INSTALL:-1}" != "1" ]]; then
+  echo "Set [printer] port in /etc/prusalink/prusalink.ini..."
+fi
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
 INI=/etc/prusalink/prusalink.ini
@@ -661,7 +868,9 @@ sed -i \\
 chown root:root \"\$INI\"
 "
 
-echo "Install systemd unit (prusalink -f + Type=simple)..."
+if [[ "${QUIET_INSTALL:-1}" != "1" ]]; then
+  echo "Install systemd unit (prusalink -f + Type=simple)..."
+fi
 pct exec "$CTID" -- bash -lc "
 set -euo pipefail
 if command -v systemctl >/dev/null 2>&1; then
@@ -685,8 +894,13 @@ Restart=on-failure
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  systemctl enable prusalink.service
-  systemctl restart prusalink.service || systemctl start prusalink.service
+  if [[ '${QUIET_INSTALL}' == '1' ]]; then
+    systemctl enable --quiet prusalink.service
+    systemctl restart prusalink.service || systemctl start prusalink.service
+  else
+    systemctl enable prusalink.service
+    systemctl restart prusalink.service || systemctl start prusalink.service
+  fi
 else
   echo 'No systemd in CT; run: source /opt/prusalink/venv/bin/activate && prusalink -f'
 fi
@@ -714,3 +928,10 @@ echo "Pinned: Debian 12 LXC, Python 3.11, Prusa-Link git ${PRUSALINK_GIT_REF}, S
 echo "Open: http://<container-ip>:8080"
 echo "Debug: pct exec ${CTID} -- bash -lc 'source /opt/prusalink/venv/bin/activate && prusalink -f -i'"
 echo "Logs:  pct exec ${CTID} -- journalctl -u prusalink.service -e --no-pager"
+
+trap - ERR
+if [[ "${INSTALL_DEBUG:-0}" == "1" ]]; then
+  echo ""
+  echo "=== INSTALL_DEBUG=1: post-install bundle (copy for feedback) ==="
+  emit_install_debug_bundle
+fi
